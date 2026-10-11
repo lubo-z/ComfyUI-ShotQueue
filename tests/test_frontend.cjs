@@ -20,7 +20,7 @@ const all = el => el.children.flatMap(c => [c, ...all(c)]);
     const shots = [{start_frame:'a.png',end_frame:'b.png',prompt:'first',duration:5},{start_frame:'c.png',end_frame:'d.png',prompt:'second',duration:7}];
     const app = {
       registerExtension(e) { extension = e; },
-      async graphToPrompt() { return {output:{'7':{class_type:'ShotQueue',inputs:{}},'8':{class_type:'SaveVideo',inputs:{}}},workflow:{nodes:[{id:7,widgets_values:[]} ]}}; }
+      async graphToPrompt() { return {output:{'7':{class_type:'ShotQueue',inputs:{}},'8':{class_type:'SaveVideo',inputs:{}}},workflow:{nodes:[{id:7,widgets_values:[],widgets_values_named:{shot_index:0}} ]}}; }
     };
     const api = {
       apiURL(path) { return path; },
@@ -85,6 +85,12 @@ const all = el => el.children.flatMap(c => [c, ...all(c)]);
     }
     assert.equal(submits[0].output['7'].inputs.shot_index,0);
     assert.equal(submits[0].output['7'].inputs.shots_json,JSON.stringify(shots));
+    for (let i=0; i<submits.length; i++) {
+      const saved = submits[i].workflow.nodes[0];
+      assert.equal(saved.widgets_values[1],i);
+      assert.equal(saved.widgets_values_named.shot_index,i);
+      assert.equal(saved.widgets_values_named.shots_json,JSON.stringify(shots));
+    }
     if (!fail) assert.equal(submits[1].output['7'].inputs.shot_index,1);
     else assert(failed);
     find(root,'Add Shot').onclick(); assert.equal(JSON.parse(n.widgets[0].value).length,3);
@@ -92,7 +98,35 @@ const all = el => el.children.flatMap(c => [c, ...all(c)]);
     assert.equal(all(root).filter(e=>e.textContent==='Start Frame').length,2);
     cleanup.checked=!clearBetweenShots; n.onConfigure();
     assert.equal(cleanup.checked,clearBetweenShots);
+    const startRow = find(root,'Start Frame').children[0];
+    assert.equal(startRow.children[0].textContent,'Preview', 'preview button must precede path input');
+    const currentPreview = all(root).find(e=>e.tagName==='img');
+    const pathInput = startRow.children[1];
+    const previewPanel = find(root,'Start Frame').children[1];
+    const savedShots = n.widgets[0].value;
+    find(root,'Preview').onclick();
+    assert.equal(new URL(`http://localhost${currentPreview.src}`).searchParams.get('filename'),'a.png');
+    assert.equal(previewPanel.style.display,'');
+    assert.equal(n.widgets[0].value,savedShots, 'preview must not alter saved shots');
+    find(root,'Close Preview').onclick();
+    assert.equal(previewPanel.style.display,'none');
+    assert.equal(currentPreview.src,undefined);
+    pathInput.value='clips/my frame.png [output]'; pathInput.oninput();
+    find(root,'Preview').onclick();
+    const previewParams = new URL(`http://localhost${currentPreview.src}`).searchParams;
+    assert.equal(previewParams.get('type'),'output');
+    assert.equal(previewParams.get('subfolder'),'clips');
+    assert.equal(previewParams.get('filename'),'my frame.png');
+    currentPreview.onerror();
+    assert.match(root.children[1].textContent,/Check the image path/);
+    find(root,'Close Preview').onclick();
+    pathInput.value=''; pathInput.oninput();
+    find(root,'Preview').onclick();
+    assert.equal(currentPreview.src,undefined);
+    assert.match(root.children[1].textContent,/Choose an image path first/);
+    pathInput.value='a.png'; pathInput.oninput();
     await find(root,'Select Image').onclick();
+    assert.equal(all(root).find(e=>e.tagName==='select').style.display,'');
     const existing = all(root).find(e=>e.tagName==='select');
     const preview = all(root).find(e=>e.tagName==='img');
     assert.equal(existing.children[2].value,'shot_queue/previous.png');
@@ -115,6 +149,26 @@ const all = el => el.children.flatMap(c => [c, ...all(c)]);
     await picker.onchange();
     assert.equal(uploadedFilename, `${'07'.repeat(16)}_frame.png`);
     assert.equal(JSON.parse(n.widgets[0].value)[0].start_frame, `shot_queue/${uploadedFilename}`);
+    // Invalid imported data must not run or overwrite the previous valid queue.
+    n.widgets[0].value='{broken'; n.onConfigure();
+    assert.equal(all(root).filter(e=>e.textContent==='Start Frame').length,0);
+    assert.match(root.children[1].textContent,/Raw data has been preserved/);
+    const previousSubmissions = submits.length;
+    await find(root,'Run Queue').onclick();
+    assert.equal(submits.length,previousSubmissions);
+    assert.equal(n.widgets[0].value,'{broken');
+    n.widgets[0].value=JSON.stringify(shots); n.onConfigure();
+    const graphToPrompt = app.graphToPrompt;
+    for (const removeNode of [false,true]) {
+      let finishConversion;
+      app.graphToPrompt = () => new Promise(resolve => { finishConversion=resolve; });
+      const pending = find(root,'Run Queue').onclick();
+      if (removeNode) n.onRemoved();
+      else find(root,'Stop Queue').onclick();
+      finishConversion(await graphToPrompt());
+      await pending;
+      assert.equal(submits.length,previousSubmissions, 'stop/removal during graph conversion must prevent submission');
+    }
   }
   console.log('Frontend checks passed: prequeue, serial cleanup, error stop, add, restore, image preview and selection, insecure-context upload.');
 })().catch(e=>{console.error(e);process.exitCode=1;});

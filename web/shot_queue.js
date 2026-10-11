@@ -6,6 +6,15 @@ let runner = null;
 const blank = () => ({ start_frame: "", end_frame: "", prompt: "", duration: 5 });
 const pause = () => new Promise(resolve => setTimeout(resolve, 1000));
 
+function previewURL(path) {
+    path = path.trim().replace(/\\/g, "/");
+    const annotation = path.match(/\s*\[(input|output|temp)\]$/);
+    if (annotation) path = path.slice(0, annotation.index).trim();
+    const slash = path.lastIndexOf("/");
+    const params = new URLSearchParams({ filename: path.slice(slash + 1), subfolder: slash < 0 ? "" : path.slice(0, slash), type: annotation?.[1] ?? "input", preview: "webp;80" });
+    return api.apiURL(`/view?${params}`);
+}
+
 async function waitForCompletion(id, state) {
     while (true) {
         if (state.stop) return false;
@@ -72,7 +81,10 @@ app.registerExtension({
                     if (!Array.isArray(parsed) || parsed.some(s => !s || typeof s !== "object" || ["start_frame", "end_frame", "prompt"].some(k => typeof s[k] !== "string") || typeof s.duration !== "number" || !Number.isFinite(s.duration) || s.duration <= 0)) throw new Error("Invalid shot data");
                     shots = parsed;
                     render();
-                } catch (e) { message(`Cannot read saved queue: ${e.message}. Raw data has been preserved.`); }
+                } catch (e) {
+                    shots = []; render();
+                    message(`Cannot read saved queue: ${e.message}. Raw data has been preserved.`);
+                }
             }
             async function browse(shot, key, input, browseButton) {
                 if (!editable()) return;
@@ -124,11 +136,19 @@ app.registerExtension({
                         const row = document.createElement("div"); row.className = "sq-path";
                         const input = document.createElement("input"); input.value = shot[key]; input.placeholder = "shot_queue/image.png or server path"; input.setAttribute("aria-label", `${text} Shot ${i + 1}`);
                         input.oninput = () => { if (editable()) { shot[key] = input.value; changed(); } else input.value = shot[key]; };
+                        button(row, "Preview", () => {
+                            if (removed) return;
+                            if (!shot[key].trim()) { message("Choose an image path first."); return; }
+                            closeActivePicker?.();
+                            existing.style.display = "none"; useButton.style.display = "none"; cancelButton.style.display = "none"; closePreviewButton.style.display = "";
+                            preview.src = previewURL(shot[key]); preview.style.display = "block";
+                            pickerPanel.style.display = ""; closeActivePicker = closePicker;
+                        });
                         row.append(input); const b = button(row, "Browse", () => browse(shot, key, input, b));
                         const pickerPanel = document.createElement("div"); pickerPanel.className = "sq-picker"; pickerPanel.style.display = "none";
                         const existing = document.createElement("select"); existing.setAttribute("aria-label", `Uploaded ${text} Shot ${i + 1}`);
                         const preview = document.createElement("img"); preview.alt = `Preview for ${text} Shot ${i + 1}`; preview.style.display = "none";
-                        preview.onerror = () => { if (pickerPanel.style.display !== "none") { preview.style.display = "none"; message("Preview unavailable; you can still use this image."); } };
+                        preview.onerror = () => { if (pickerPanel.style.display !== "none") { preview.style.display = "none"; message("Preview unavailable. Check the image path."); } };
                         const pickerActions = document.createElement("div"); pickerActions.className = "sq-actions";
                         const closePicker = () => { pickerPanel.style.display = "none"; existing.value = ""; preview.removeAttribute("src"); preview.style.display = "none"; useButton.disabled = true; if (closeActivePicker === closePicker) closeActivePicker = null; };
                         const useButton = button(pickerActions, "Use Image", () => {
@@ -136,12 +156,11 @@ app.registerExtension({
                             shot[key] = existing.value; input.value = shot[key]; changed(); closePicker(); message("Image path saved.");
                         });
                         useButton.disabled = true;
-                        button(pickerActions, "Cancel", closePicker);
+                        const cancelButton = button(pickerActions, "Cancel", closePicker);
+                        const closePreviewButton = button(pickerActions, "Close Preview", closePicker); closePreviewButton.style.display = "none";
                         existing.onchange = () => {
                             if (!editable() || !existing.value) { preview.removeAttribute("src"); preview.style.display = "none"; useButton.disabled = true; return; }
-                            const slash = existing.value.lastIndexOf("/");
-                            const params = new URLSearchParams({ filename: existing.value.slice(slash + 1), subfolder: slash < 0 ? "" : existing.value.slice(0, slash), type: "input", preview: "webp;80" });
-                            preview.src = api.apiURL(`/view?${params}`);
+                            preview.src = previewURL(existing.value);
                             preview.style.display = "block"; useButton.disabled = false;
                         };
                         pickerPanel.append(existing, preview, pickerActions);
@@ -160,6 +179,7 @@ app.registerExtension({
                                     const option = document.createElement("option"); option.value = path; option.textContent = path; existing.append(option);
                                 }
                                 closeActivePicker?.();
+                                existing.style.display = ""; useButton.style.display = ""; cancelButton.style.display = ""; closePreviewButton.style.display = "none";
                                 existing.value = ""; preview.removeAttribute("src"); preview.style.display = "none"; useButton.disabled = true; pickerPanel.style.display = ""; closeActivePicker = closePicker;
                                 if (files.length) existing.focus();
                                 message(files.length ? "Choose an image to preview." : "No images found in ComfyUI input.");
@@ -190,7 +210,7 @@ app.registerExtension({
             const runButton = button(toolbar, "Run Queue", async () => {
                 if (!editable() || removed) return;
                 if (!shots.length) { message("Add at least one shot."); return; }
-                const state = { stop: false }; runner = state; runButton.disabled = true; cleanup.disabled = true; closeActivePicker?.();
+                const state = { stop: false, node }; runner = state; runButton.disabled = true; cleanup.disabled = true; closeActivePicker?.();
                 try {
                     changed();
                     const snapshot = await app.graphToPrompt();
@@ -208,6 +228,7 @@ app.registerExtension({
                         // Ensure saved output metadata also identifies the submitted shot.
                         const savedNode = job.workflow.nodes?.find(n => String(n.id) === String(node.id));
                         if (savedNode?.widgets_values) { savedNode.widgets_values[0] = frozenShots; savedNode.widgets_values[1] = i; }
+                        if (savedNode?.widgets_values_named) { savedNode.widgets_values_named.shots_json = frozenShots; savedNode.widgets_values_named.shot_index = i; }
                         message(`${clearBetweenShots ? "Running" : "Queueing"} Shot ${i + 1}/${shots.length}…`);
                         const result = await api.queuePrompt(0, job);
                         if (!result?.prompt_id || Object.keys(result.node_errors || {}).length) throw new Error("Workflow submission failed. Check node validation errors.");
@@ -227,9 +248,6 @@ app.registerExtension({
                 if (runner?.node === node) { runner.stop = true; message("Stopping submissions; submitted shots may still run."); }
                 else message("Use ComfyUI's queue controls to cancel already submitted shots.");
             });
-            // Attach ownership as soon as the runner is created, including graph conversion.
-            const runAction = runButton.onclick;
-            runButton.onclick = async () => { const pending = runAction(); if (runner) runner.node ??= node; await pending; };
             const dom = node.addDOMWidget("shot_queue_ui", "shot_queue_ui", root, {
                 serialize: false,
                 getMinHeight: () => 180,

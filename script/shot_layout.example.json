@@ -1,0 +1,8 @@
+{
+  "jobs": "/path/to/production",
+  "job_glob": "**/EXPORT",
+  "start_frame": "first_frame.png",
+  "end_frame": "last_frame.png",
+  "prompt": "prompt.txt",
+  "duration": "duration.txt"
+}
